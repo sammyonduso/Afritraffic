@@ -17,8 +17,16 @@ db.exec(`
     points REAL DEFAULT 0,
     earnings REAL DEFAULT 0,
     locked_earnings REAL DEFAULT 0,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    referral_code TEXT UNIQUE,
+    referred_by INTEGER,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(referred_by) REFERENCES users(id)
   );
+
+  -- Migration: Add columns if they don't exist (for existing DB)
+  -- SQLite doesn't support ADD COLUMN IF NOT EXISTS easily in one line, 
+  -- but since this is an MVP we can just ensure the table is created correctly.
+  -- For a real app, we'd use a migration script.
 
   CREATE TABLE IF NOT EXISTS sites (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,14 +69,33 @@ async function startServer() {
   // API Routes
   app.get('/api/stats', (req, res) => {
     // Mock user for MVP (normally would use session/JWT)
-    const user = db.prepare('SELECT * FROM users LIMIT 1').get() || {
-      id: 1,
-      username: 'demo_user',
-      points: 1250,
-      earnings: 45.50,
-      locked_earnings: 12.20
-    };
+    let user = db.prepare('SELECT * FROM users LIMIT 1').get();
+    
+    if (!user) {
+      // Create a default demo user if none exists
+      const referralCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+      db.prepare('INSERT INTO users (username, points, earnings, locked_earnings, referral_code) VALUES (?, ?, ?, ?, ?)').run(
+        'AfricanPioneer', 1240, 52.30, 15.45, referralCode
+      );
+      user = db.prepare('SELECT * FROM users LIMIT 1').get();
+    }
+    
     res.json(user);
+  });
+
+  app.get('/api/referrals', (req, res) => {
+    const userId = 1; // Mock user ID
+    const referrals = db.prepare(`
+      SELECT username, created_at 
+      FROM users 
+      WHERE referred_by = ?
+    `).all(userId);
+    
+    res.json({
+      count: referrals.length,
+      list: referrals,
+      bonus_per_referral: 50 // Points
+    });
   });
 
   app.get('/api/my-sites', (req, res) => {

@@ -11,15 +11,19 @@ import {
   ChevronRight,
   Menu,
   X,
-  Zap
+  Zap,
+  Users,
+  Copy,
+  Check
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { User, Stats, Site } from './types';
+import { User, Stats, Site, ReferralData } from './types';
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [stats, setStats] = useState<Stats | null>(null);
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'exchange' | 'wallet' | 'admin'>('dashboard');
+  const [referralData, setReferralData] = useState<ReferralData | null>(null);
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'exchange' | 'wallet' | 'referrals' | 'admin'>('dashboard');
   const [isSidebarOpen, setSidebarOpen] = useState(true);
   const [isViewing, setIsViewing] = useState(false);
   const [exchangeSubTab, setExchangeSubTab] = useState<'surf' | 'manage'>('surf');
@@ -28,22 +32,35 @@ export default function App() {
   const [newSitePoints, setNewSitePoints] = useState(1);
   const [currentSite, setCurrentSite] = useState<Site | null>(null);
   const [countdown, setCountdown] = useState(0);
+  const [copied, setCopied] = useState(false);
   const viewTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
+    fetchUserData();
     fetchStats();
     fetchMySites();
-    // Mock user login
-    setUser({
-      id: 1,
-      username: 'AfricanPioneer',
-      wallet_address: 'T...',
-      points: 1240,
-      earnings: 52.30,
-      locked_earnings: 15.45,
-      created_at: '2026-01-10'
-    });
+    fetchReferralData();
   }, []);
+
+  const fetchUserData = async () => {
+    try {
+      const res = await fetch('/api/stats');
+      const data = await res.json();
+      setUser(data);
+    } catch (err) {
+      console.error('Failed to fetch user data');
+    }
+  };
+
+  const fetchReferralData = async () => {
+    try {
+      const res = await fetch('/api/referrals');
+      const data = await res.json();
+      setReferralData(data);
+    } catch (err) {
+      console.error('Failed to fetch referral data');
+    }
+  };
 
   const fetchMySites = async () => {
     try {
@@ -163,6 +180,13 @@ export default function App() {
             label="Wallet & Payouts" 
             active={activeTab === 'wallet'} 
             onClick={() => setActiveTab('wallet')}
+            collapsed={!isSidebarOpen}
+          />
+          <NavItem 
+            icon={<Users size={20} />} 
+            label="Referrals" 
+            active={activeTab === 'referrals'} 
+            onClick={() => setActiveTab('referrals')}
             collapsed={!isSidebarOpen}
           />
           <NavItem 
@@ -535,6 +559,92 @@ export default function App() {
                     </div>
                   </section>
                 </div>
+              </motion.div>
+            )}
+
+            {activeTab === 'referrals' && (
+              <motion.div 
+                key="referrals"
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="max-w-4xl mx-auto space-y-8"
+              >
+                <div className="bg-white p-8 rounded-3xl border border-gray-200 shadow-sm space-y-6">
+                  <div className="flex items-center gap-4">
+                    <div className="w-12 h-12 bg-emerald-100 rounded-2xl flex items-center justify-center text-emerald-600">
+                      <Users size={24} />
+                    </div>
+                    <div>
+                      <h3 className="text-xl font-bold">Invite Friends</h3>
+                      <p className="text-gray-500 text-sm">Earn {referralData?.bonus_per_referral} points for every friend who joins.</p>
+                    </div>
+                  </div>
+
+                  <div className="bg-gray-50 p-6 rounded-2xl border border-gray-100">
+                    <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Your Referral Link</label>
+                    <div className="flex gap-2">
+                      <input 
+                        type="text" 
+                        readOnly
+                        value={`${window.location.origin}/?ref=${user?.referral_code}`}
+                        className="flex-1 bg-white border border-gray-200 rounded-xl px-4 py-3 text-sm font-mono focus:outline-none"
+                      />
+                      <button 
+                        onClick={() => {
+                          navigator.clipboard.writeText(`${window.location.origin}/?ref=${user?.referral_code}`);
+                          setCopied(true);
+                          setTimeout(() => setCopied(false), 2000);
+                        }}
+                        className={`px-6 py-3 rounded-xl font-bold transition-all flex items-center gap-2 ${copied ? 'bg-emerald-600 text-white' : 'bg-gray-900 text-white hover:bg-gray-800'}`}
+                      >
+                        {copied ? <Check size={18} /> : <Copy size={18} />}
+                        {copied ? 'Copied' : 'Copy Link'}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div className="p-6 bg-emerald-50 rounded-2xl border border-emerald-100">
+                      <p className="text-xs font-bold text-emerald-600 uppercase mb-1">Total Referrals</p>
+                      <p className="text-3xl font-bold text-emerald-900">{referralData?.count || 0}</p>
+                    </div>
+                    <div className="p-6 bg-purple-50 rounded-2xl border border-purple-100">
+                      <p className="text-xs font-bold text-purple-600 uppercase mb-1">Referral Earnings</p>
+                      <p className="text-3xl font-bold text-purple-900">{(referralData?.count || 0) * (referralData?.bonus_per_referral || 0)} Pts</p>
+                    </div>
+                  </div>
+                </div>
+
+                <section className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+                  <div className="p-6 border-b border-gray-100">
+                    <h3 className="font-bold">Your Referrals</h3>
+                  </div>
+                  <table className="w-full text-left">
+                    <thead className="bg-gray-50 text-xs font-bold text-gray-400 uppercase">
+                      <tr>
+                        <th className="px-6 py-4">Username</th>
+                        <th className="px-6 py-4">Joined At</th>
+                        <th className="px-6 py-4">Bonus</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {referralData?.list.map((ref, i) => (
+                        <tr key={i} className="hover:bg-gray-50 transition-colors">
+                          <td className="px-6 py-4 text-sm font-semibold">{ref.username}</td>
+                          <td className="px-6 py-4 text-sm text-gray-500">{new Date(ref.created_at).toLocaleDateString()}</td>
+                          <td className="px-6 py-4 text-sm text-emerald-600 font-bold">+{referralData.bonus_per_referral} Pts</td>
+                        </tr>
+                      ))}
+                      {(!referralData || referralData.list.length === 0) && (
+                        <tr>
+                          <td colSpan={3} className="px-6 py-12 text-center text-gray-400 text-sm">
+                            No referrals yet. Start inviting!
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </section>
               </motion.div>
             )}
 

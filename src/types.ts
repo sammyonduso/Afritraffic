@@ -5,20 +5,21 @@ export interface User {
   points: number;
   earnings: number;
   locked_earnings: number;
+  referral_code?: string;
+  referred_by?: number;
   created_at: string;
+}
+
+export interface ReferralData {
+  count: number;
+  list: { username: string; created_at: string }[];
+  bonus_per_referral: number;
 }
 
 export interface Site {
   id: number;
   url: string;
   points_per_view: number;
-}
-
-export interface Campaign extends Site {
-  priority: 'High' | 'Medium' | 'Low';
-  dueDate: string;
-  status: 'Active' | 'Completed' | 'Paused';
-  owner_name: string;
 }
 
 export interface Stats {
