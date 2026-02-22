@@ -60,6 +60,24 @@ db.exec(`
   );
 `);
 
+// Migration helper: Add columns if they don't exist
+const tableInfo = db.prepare("PRAGMA table_info(users)").all() as any[];
+const columns = tableInfo.map(c => c.name);
+
+if (!columns.includes('referral_code')) {
+  try {
+    db.prepare('ALTER TABLE users ADD COLUMN referral_code TEXT UNIQUE').run();
+    console.log('Migration: Added referral_code column to users table');
+  } catch (e) { console.error('Migration error (referral_code):', e); }
+}
+
+if (!columns.includes('referred_by')) {
+  try {
+    db.prepare('ALTER TABLE users ADD COLUMN referred_by INTEGER').run();
+    console.log('Migration: Added referred_by column to users table');
+  } catch (e) { console.error('Migration error (referred_by):', e); }
+}
+
 async function startServer() {
   const app = express();
   const PORT = 3000;
@@ -68,19 +86,24 @@ async function startServer() {
 
   // API Routes
   app.get('/api/stats', (req, res) => {
-    // Mock user for MVP (normally would use session/JWT)
-    let user = db.prepare('SELECT * FROM users LIMIT 1').get();
-    
-    if (!user) {
-      // Create a default demo user if none exists
-      const referralCode = Math.random().toString(36).substring(2, 8).toUpperCase();
-      db.prepare('INSERT INTO users (username, points, earnings, locked_earnings, referral_code) VALUES (?, ?, ?, ?, ?)').run(
-        'AfricanPioneer', 1240, 52.30, 15.45, referralCode
-      );
-      user = db.prepare('SELECT * FROM users LIMIT 1').get();
+    try {
+      // Mock user for MVP (normally would use session/JWT)
+      let user = db.prepare('SELECT * FROM users LIMIT 1').get();
+      
+      if (!user) {
+        // Create a default demo user if none exists
+        const referralCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+        db.prepare('INSERT OR REPLACE INTO users (username, points, earnings, locked_earnings, referral_code) VALUES (?, ?, ?, ?, ?)').run(
+          'AfricanPioneer', 1240, 52.30, 15.45, referralCode
+        );
+        user = db.prepare('SELECT * FROM users LIMIT 1').get();
+      }
+      
+      res.json(user);
+    } catch (err) {
+      console.error('Error in /api/stats:', err);
+      res.status(500).json({ error: 'Internal server error', details: (err as Error).message });
     }
-    
-    res.json(user);
   });
 
   app.get('/api/referrals', (req, res) => {
@@ -157,13 +180,14 @@ async function startServer() {
   app.get('/api/adsterra/revenue', async (req, res) => {
     const apiKey = process.env.ADSTERRA_API_KEY;
     
-    if (!apiKey) {
-      // Fallback to mock data if API key is missing
+    if (!apiKey || apiKey === 'MY_ADSTERRA_API_KEY' || apiKey.trim() === '') {
+      // Fallback to mock data if API key is missing or placeholder
       return res.json({
         daily_revenue: 1.24,
         total_unpaid: 15.60,
         cpm: 0.45,
-        is_mock: true
+        is_mock: true,
+        message: "No valid ADSTERRA_API_KEY found in environment."
       });
     }
 
@@ -172,12 +196,36 @@ async function startServer() {
       const today = new Date().toISOString().split('T')[0];
       const url = `https://api.adsterra.com/v1/publisher/stats.json?api_key=${apiKey}&date_from=${today}&date_to=${today}`;
       
-      const response = await fetch(url);
-      if (!response.ok) {
-        throw new Error(`Adsterra API error: ${response.statusText}`);
-      }
+      console.log(`Fetching Adsterra stats from: ${url.replace(apiKey, 'HIDDEN')}`);
       
-      const data = await response.json();
+      const response = await fetch(url);
+      const contentType = response.headers.get("content-type");
+      
+      let data;
+      if (contentType && contentType.includes("application/json")) {
+        data = await response.json();
+      } else {
+        const text = await response.text();
+        console.warn('Adsterra API Non-JSON Response (Falling back to mock):', text.substring(0, 100));
+        return res.json({
+          daily_revenue: 1.24,
+          total_unpaid: 15.60,
+          cpm: 0.45,
+          is_mock: true,
+          warning: `Adsterra API returned non-JSON (${response.status})`
+        });
+      }
+
+      if (!response.ok) {
+        console.warn(`Adsterra API Error ${response.status} (Falling back to mock):`, data);
+        return res.json({
+          daily_revenue: 1.24,
+          total_unpaid: 15.60,
+          cpm: 0.45,
+          is_mock: true,
+          warning: `Adsterra API error: ${response.status}`
+        });
+      }
       
       // Adsterra returns an array of stats per day/placement
       // We'll aggregate them for the dashboard
@@ -189,6 +237,8 @@ async function startServer() {
           dailyRevenue += parseFloat(item.revenue || 0);
           impressions += parseInt(item.impressions || 0);
         });
+      } else if (data && data.error) {
+        throw new Error(data.error);
       }
 
       res.json({
@@ -199,8 +249,14 @@ async function startServer() {
         is_mock: false
       });
     } catch (err) {
-      console.error('Adsterra API Fetch Error:', err);
-      res.status(500).json({ error: 'Failed to fetch Adsterra stats', details: (err as Error).message });
+      console.error('Adsterra API Fetch Error (Falling back to mock):', err);
+      res.json({
+        daily_revenue: 1.24,
+        total_unpaid: 15.60,
+        cpm: 0.45,
+        is_mock: true,
+        error: (err as Error).message
+      });
     }
   });
 

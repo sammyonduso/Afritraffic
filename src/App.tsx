@@ -22,6 +22,7 @@ import { User, Stats, Site, ReferralData } from './types';
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [stats, setStats] = useState<Stats | null>(null);
+  const [statsError, setStatsError] = useState<string | null>(null);
   const [referralData, setReferralData] = useState<ReferralData | null>(null);
   const [activeTab, setActiveTab] = useState<'dashboard' | 'exchange' | 'wallet' | 'referrals' | 'admin'>('dashboard');
   const [isSidebarOpen, setSidebarOpen] = useState(true);
@@ -45,30 +46,45 @@ export default function App() {
   const fetchUserData = async () => {
     try {
       const res = await fetch('/api/stats');
+      if (!res.ok) throw new Error(`Server error: ${res.status}`);
+      const contentType = res.headers.get("content-type");
+      if (!contentType || !contentType.includes("application/json")) {
+        throw new Error("Server returned non-JSON response");
+      }
       const data = await res.json();
       setUser(data);
     } catch (err) {
-      console.error('Failed to fetch user data');
+      console.error('Failed to fetch user data:', err);
     }
   };
 
   const fetchReferralData = async () => {
     try {
       const res = await fetch('/api/referrals');
+      if (!res.ok) throw new Error(`Server error: ${res.status}`);
+      const contentType = res.headers.get("content-type");
+      if (!contentType || !contentType.includes("application/json")) {
+        throw new Error("Server returned non-JSON response");
+      }
       const data = await res.json();
       setReferralData(data);
     } catch (err) {
-      console.error('Failed to fetch referral data');
+      console.error('Failed to fetch referral data:', err);
     }
   };
 
   const fetchMySites = async () => {
     try {
       const res = await fetch('/api/my-sites');
+      if (!res.ok) throw new Error(`Server error: ${res.status}`);
+      const contentType = res.headers.get("content-type");
+      if (!contentType || !contentType.includes("application/json")) {
+        throw new Error("Server returned non-JSON response");
+      }
       const data = await res.json();
       setMySites(data);
     } catch (err) {
-      console.error('Failed to fetch my sites');
+      console.error('Failed to fetch my sites:', err);
     }
   };
 
@@ -92,11 +108,22 @@ export default function App() {
 
   const fetchStats = async () => {
     try {
+      setStatsError(null);
       const res = await fetch('/api/adsterra/revenue');
+      const contentType = res.headers.get("content-type");
+      
+      if (!contentType || !contentType.includes("application/json")) {
+        throw new Error(`Server returned non-JSON response (${res.status})`);
+      }
+      
       const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.details || data.error || 'Failed to fetch stats');
+      }
       setStats(data);
     } catch (err) {
-      console.error('Failed to fetch stats');
+      console.error('Failed to fetch stats:', err);
+      setStatsError((err as Error).message);
     }
   };
 
@@ -256,10 +283,10 @@ export default function App() {
                   />
                   <StatCard 
                     title="Daily Ad Revenue" 
-                    value={`$${stats?.daily_revenue.toFixed(2) || '0.00'}`} 
-                    icon={<TrendingUp className="text-blue-600" />}
-                    subtitle={stats?.is_mock ? "Using Mock Data (No API Key)" : `Based on ${stats?.impressions?.toLocaleString()} impressions`}
-                    trend={stats?.is_mock ? undefined : "Live from Adsterra"}
+                    value={statsError ? "Error" : `$${stats?.daily_revenue.toFixed(2) || '0.00'}`} 
+                    icon={<TrendingUp className={statsError ? "text-red-600" : "text-blue-600"} />}
+                    subtitle={statsError ? statsError : (stats?.is_mock ? "Using Mock Data (No API Key)" : `Based on ${stats?.impressions?.toLocaleString()} impressions`)}
+                    trend={statsError ? undefined : (stats?.is_mock ? undefined : "Live from Adsterra")}
                   />
                   <StatCard 
                     title="Total Points" 
