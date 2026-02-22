@@ -3,6 +3,7 @@ import { createServer as createViteServer } from 'vite';
 import Database from 'better-sqlite3';
 import dotenv from 'dotenv';
 import path from 'path';
+import bcrypt from 'bcryptjs';
 
 dotenv.config();
 
@@ -13,6 +14,8 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT UNIQUE,
+    email TEXT UNIQUE,
+    password TEXT,
     wallet_address TEXT,
     points REAL DEFAULT 0,
     earnings REAL DEFAULT 0,
@@ -78,6 +81,20 @@ if (!columns.includes('referred_by')) {
   } catch (e) { console.error('Migration error (referred_by):', e); }
 }
 
+if (!columns.includes('email')) {
+  try {
+    db.prepare('ALTER TABLE users ADD COLUMN email TEXT UNIQUE').run();
+    console.log('Migration: Added email column to users table');
+  } catch (e) { console.error('Migration error (email):', e); }
+}
+
+if (!columns.includes('password')) {
+  try {
+    db.prepare('ALTER TABLE users ADD COLUMN password TEXT').run();
+    console.log('Migration: Added password column to users table');
+  } catch (e) { console.error('Migration error (password):', e); }
+}
+
 async function startServer() {
   const app = express();
   const PORT = 3000;
@@ -85,18 +102,53 @@ async function startServer() {
   app.use(express.json());
 
   // API Routes
+  app.post('/api/register', async (req, res) => {
+    const { username, email, password, referralCode } = req.body;
+
+    if (!username || !email || !password) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    try {
+      const hashedPassword = await bcrypt.hash(password, 10);
+      const newReferralCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+      
+      let referredById = null;
+      if (referralCode) {
+        const referrer = db.prepare('SELECT id FROM users WHERE referral_code = ?').get(referralCode) as any;
+        if (referrer) {
+          referredById = referrer.id;
+        }
+      }
+
+      const result = db.prepare(`
+        INSERT INTO users (username, email, password, referral_code, referred_by, points) 
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(username, email, hashedPassword, newReferralCode, referredById, referredById ? 50 : 0); // 50 bonus points if referred
+
+      if (referredById) {
+        // Award bonus to referrer too
+        db.prepare('UPDATE users SET points = points + 50 WHERE id = ?').run(referredById);
+      }
+
+      const user = db.prepare('SELECT id, username, email, points, earnings, locked_earnings, referral_code FROM users WHERE id = ?').get(result.lastInsertRowid);
+      res.json(user);
+    } catch (err: any) {
+      if (err.message.includes('UNIQUE constraint failed')) {
+        return res.status(400).json({ error: 'Username or email already exists' });
+      }
+      console.error('Registration error:', err);
+      res.status(500).json({ error: 'Registration failed' });
+    }
+  });
+
   app.get('/api/stats', (req, res) => {
     try {
       // Mock user for MVP (normally would use session/JWT)
       let user = db.prepare('SELECT * FROM users LIMIT 1').get();
       
       if (!user) {
-        // Create a default demo user if none exists
-        const referralCode = Math.random().toString(36).substring(2, 8).toUpperCase();
-        db.prepare('INSERT OR REPLACE INTO users (username, points, earnings, locked_earnings, referral_code) VALUES (?, ?, ?, ?, ?)').run(
-          'AfricanPioneer', 1240, 52.30, 15.45, referralCode
-        );
-        user = db.prepare('SELECT * FROM users LIMIT 1').get();
+        return res.status(401).json({ error: 'No user found' });
       }
       
       res.json(user);
@@ -107,7 +159,10 @@ async function startServer() {
   });
 
   app.get('/api/referrals', (req, res) => {
-    const userId = 1; // Mock user ID
+    const user = db.prepare('SELECT id FROM users LIMIT 1').get() as any;
+    if (!user) return res.status(401).json({ error: 'No user found' });
+    
+    const userId = user.id;
     const referrals = db.prepare(`
       SELECT username, created_at 
       FROM users 
@@ -122,7 +177,10 @@ async function startServer() {
   });
 
   app.get('/api/my-sites', (req, res) => {
-    const userId = 1; // Mock user ID
+    const user = db.prepare('SELECT id FROM users LIMIT 1').get() as any;
+    if (!user) return res.status(401).json({ error: 'No user found' });
+
+    const userId = user.id;
     const sites = db.prepare(`
       SELECT s.*, COUNT(v.id) as total_views 
       FROM sites s 
@@ -135,7 +193,9 @@ async function startServer() {
 
   app.post('/api/sites', (req, res) => {
     const { url, pointsPerView } = req.body;
-    const userId = 1; // Mock user ID
+    const user = db.prepare('SELECT id FROM users LIMIT 1').get() as any;
+    if (!user) return res.status(401).json({ error: 'No user found' });
+    const userId = user.id;
 
     if (!url || !pointsPerView) {
       return res.status(400).json({ error: 'Missing required fields' });
@@ -150,7 +210,11 @@ async function startServer() {
   });
 
   app.post('/api/view-complete', (req, res) => {
-    const { siteId, userId, duration } = req.body;
+    const { siteId, duration } = req.body;
+    const user = db.prepare('SELECT id FROM users LIMIT 1').get() as any;
+    if (!user) return res.status(401).json({ error: 'No user found' });
+    const userId = user.id;
+
     const ip = req.ip;
     const ua = req.headers['user-agent'];
 

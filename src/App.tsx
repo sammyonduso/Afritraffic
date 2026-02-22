@@ -34,18 +34,67 @@ export default function App() {
   const [currentSite, setCurrentSite] = useState<Site | null>(null);
   const [countdown, setCountdown] = useState(0);
   const [copied, setCopied] = useState(false);
+  const [regUsername, setRegUsername] = useState('');
+  const [regEmail, setRegEmail] = useState('');
+  const [regPassword, setRegPassword] = useState('');
+  const [regError, setRegError] = useState('');
+  const [isRegistering, setIsRegistering] = useState(false);
   const viewTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const ref = urlParams.get('ref');
+    if (ref) {
+      localStorage.setItem('referral_code', ref);
+    }
     fetchUserData();
-    fetchStats();
-    fetchMySites();
-    fetchReferralData();
   }, []);
+
+  useEffect(() => {
+    if (user) {
+      fetchStats();
+      fetchMySites();
+      fetchReferralData();
+    }
+  }, [user]);
+
+  const handleRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setRegError('');
+    setIsRegistering(true);
+    try {
+      const referralCode = localStorage.getItem('referral_code');
+      const res = await fetch('/api/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          username: regUsername, 
+          email: regEmail, 
+          password: regPassword,
+          referralCode 
+        })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setUser(data);
+        localStorage.removeItem('referral_code');
+      } else {
+        setRegError(data.error || 'Registration failed');
+      }
+    } catch (err) {
+      setRegError('Network error occurred');
+    } finally {
+      setIsRegistering(false);
+    }
+  };
 
   const fetchUserData = async () => {
     try {
       const res = await fetch('/api/stats');
+      if (res.status === 401) {
+        setUser(null);
+        return;
+      }
       if (!res.ok) throw new Error(`Server error: ${res.status}`);
       const contentType = res.headers.get("content-type");
       if (!contentType || !contentType.includes("application/json")) {
@@ -172,6 +221,88 @@ export default function App() {
     setCurrentSite(null);
   };
 
+  if (!user) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="bg-white p-8 rounded-3xl border border-gray-200 shadow-xl w-full max-w-md space-y-8"
+        >
+          <div className="text-center">
+            <div className="w-16 h-16 bg-emerald-600 rounded-2xl flex items-center justify-center text-white mx-auto mb-4 shadow-lg shadow-emerald-200">
+              <Zap size={32} />
+            </div>
+            <h1 className="text-2xl font-bold">Join Traffic Exchange</h1>
+            <p className="text-gray-500 text-sm">Start earning points and traffic today</p>
+          </div>
+
+          <form onSubmit={handleRegister} className="space-y-4">
+            <div>
+              <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Username</label>
+              <input 
+                type="text" 
+                required
+                value={regUsername}
+                onChange={(e) => setRegUsername(e.target.value)}
+                className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                placeholder="Choose a username"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Email Address</label>
+              <input 
+                type="email" 
+                required
+                value={regEmail}
+                onChange={(e) => setRegEmail(e.target.value)}
+                className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                placeholder="your@email.com"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Password</label>
+              <input 
+                type="password" 
+                required
+                value={regPassword}
+                onChange={(e) => setRegPassword(e.target.value)}
+                className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                placeholder="••••••••"
+              />
+            </div>
+
+            {regError && (
+              <div className="p-3 bg-red-50 border border-red-100 rounded-xl text-red-600 text-xs flex items-center gap-2">
+                <AlertCircle size={14} />
+                {regError}
+              </div>
+            )}
+
+            {localStorage.getItem('referral_code') && (
+              <div className="p-3 bg-emerald-50 border border-emerald-100 rounded-xl text-emerald-700 text-xs flex items-center gap-2">
+                <Users size={14} />
+                Referral code applied: <span className="font-bold">{localStorage.getItem('referral_code')}</span>
+              </div>
+            )}
+
+            <button 
+              type="submit"
+              disabled={isRegistering}
+              className="w-full py-4 bg-emerald-600 text-white rounded-2xl font-bold shadow-lg shadow-emerald-100 hover:bg-emerald-700 transition-all disabled:opacity-50"
+            >
+              {isRegistering ? 'Creating Account...' : 'Create Account'}
+            </button>
+          </form>
+
+          <div className="text-center text-xs text-gray-400">
+            By registering, you agree to our Terms of Service.
+          </div>
+        </motion.div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#F8F9FA] text-[#1A1A1A] font-sans flex">
       {/* Sidebar */}
@@ -223,6 +354,15 @@ export default function App() {
             onClick={() => setActiveTab('admin')}
             collapsed={!isSidebarOpen}
           />
+          <div className="mt-auto p-4">
+            <button 
+              onClick={() => setUser(null)}
+              className="w-full flex items-center gap-3 px-4 py-3 text-red-600 hover:bg-red-50 rounded-xl transition-colors font-medium"
+            >
+              <X size={20} />
+              {isSidebarOpen && <span>Logout</span>}
+            </button>
+          </div>
         </nav>
 
         <div className="p-4 border-t border-gray-100">
