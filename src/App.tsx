@@ -42,6 +42,8 @@ export default function App() {
   const [siteError, setSiteError] = useState<string | null>(null);
   const [isIframeLoading, setIsIframeLoading] = useState(true);
   const [showEarnedPoints, setShowEarnedPoints] = useState<number | null>(null);
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
+  const [exchangeError, setExchangeError] = useState<string | null>(null);
   const viewTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
@@ -77,15 +79,22 @@ export default function App() {
           referralCode 
         })
       });
-      const data = await res.json();
-      if (res.ok) {
-        setUser(data);
-        localStorage.removeItem('referral_code');
+      
+      const contentType = res.headers.get("content-type");
+      if (contentType && contentType.includes("application/json")) {
+        const data = await res.json();
+        if (res.ok) {
+          setUser(data);
+          localStorage.removeItem('referral_code');
+        } else {
+          setRegError(data.error || data.details || 'Registration failed');
+        }
       } else {
-        setRegError(data.error || 'Registration failed');
+        const text = await res.text();
+        setRegError(`Server error (${res.status}): ${text.substring(0, 50)}`);
       }
     } catch (err) {
-      setRegError('Network error occurred');
+      setRegError('Network error occurred. Please check your connection.');
     } finally {
       setIsRegistering(false);
     }
@@ -235,46 +244,74 @@ export default function App() {
     }
   };
 
-  const startExchange = () => {
+  const startExchange = async () => {
+    setExchangeError(null);
     setIsViewing(true);
     setIsIframeLoading(true);
-    setCurrentSite({
-      id: Math.floor(Math.random() * 100),
+    
+    // In a real app, this would fetch a random site from the backend
+    const site = {
+      id: 1,
       url: 'https://example.com',
       points_per_view: 1
-    });
-    setCountdown(15);
+    };
     
-    if (viewTimerRef.current) clearInterval(viewTimerRef.current);
+    setCurrentSite(site);
     
-    viewTimerRef.current = setInterval(() => {
-      setCountdown(prev => {
-        if (prev <= 1) {
-          clearInterval(viewTimerRef.current!);
-          completeView();
-          return 0;
-        }
-        return prev - 1;
+    try {
+      const res = await fetch('/api/view-start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ siteId: site.id })
       });
-    }, 1000);
+      const data = await res.json();
+      
+      if (res.ok) {
+        setCurrentSessionId(data.sessionId);
+        setCountdown(20);
+        
+        if (viewTimerRef.current) clearInterval(viewTimerRef.current);
+        
+        viewTimerRef.current = setInterval(() => {
+          setCountdown(prev => {
+            if (prev <= 1) {
+              clearInterval(viewTimerRef.current!);
+              completeView(data.sessionId);
+              return 0;
+            }
+            return prev - 1;
+          });
+        }, 1000);
+      } else {
+        setExchangeError(data.error || 'Failed to start session');
+        setIsViewing(false);
+      }
+    } catch (err) {
+      setExchangeError('Network error');
+      setIsViewing(false);
+    }
   };
 
-  const completeView = async () => {
+  const completeView = async (sessionId: string) => {
     try {
       const res = await fetch('/api/view-complete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ siteId: currentSite?.id, userId: user?.id, duration: 15 })
+        body: JSON.stringify({ siteId: currentSite?.id, sessionId })
       });
       const data = await res.json();
-      if (data.success) {
+      if (res.ok) {
         setUser(prev => prev ? { ...prev, points: prev.points + data.points_earned } : null);
         setShowEarnedPoints(data.points_earned);
         setTimeout(() => setShowEarnedPoints(null), 3000);
-        // Continue to next site
-        setTimeout(startExchange, 1000);
+        // Continue to next site after a short delay
+        setTimeout(startExchange, 2000);
+      } else {
+        setExchangeError(data.error || 'View validation failed');
+        setIsViewing(false);
       }
     } catch (err) {
+      setExchangeError('Network error during validation');
       setIsViewing(false);
     }
   };
@@ -584,16 +621,22 @@ export default function App() {
                       </div>
                       <h2 className="text-3xl font-bold">Traffic Exchange</h2>
                       <p className="text-gray-500">
-                        Earn points by viewing websites for 15 seconds each. 
+                        Earn points by viewing websites for 20 seconds each. 
                         Our anti-fraud system ensures quality traffic for all members.
                       </p>
+                      {exchangeError && (
+                        <div className="w-full p-4 bg-red-50 border border-red-100 rounded-2xl text-red-600 text-sm flex items-center gap-3">
+                          <AlertCircle size={20} />
+                          {exchangeError}
+                        </div>
+                      )}
                       <div className="grid grid-cols-2 gap-4 w-full">
                         <div className="p-4 bg-white border border-gray-200 rounded-2xl">
                           <p className="text-2xl font-bold">1.0</p>
                           <p className="text-xs text-gray-500 uppercase tracking-wider font-semibold">Points / View</p>
                         </div>
                         <div className="p-4 bg-white border border-gray-200 rounded-2xl">
-                          <p className="text-2xl font-bold">15s</p>
+                          <p className="text-2xl font-bold">20s</p>
                           <p className="text-xs text-gray-500 uppercase tracking-wider font-semibold">Minimum Time</p>
                         </div>
                       </div>
@@ -629,7 +672,7 @@ export default function App() {
                                     fill="none" stroke="currentColor" 
                                     strokeWidth="3" className="text-emerald-500"
                                     strokeDasharray="88"
-                                    animate={{ strokeDashoffset: 88 - (88 * countdown / 15) }}
+                                    animate={{ strokeDashoffset: 88 - (88 * countdown / 20) }}
                                     transition={{ duration: 1, ease: "linear" }}
                                   />
                                 </svg>
@@ -647,7 +690,7 @@ export default function App() {
                         <div className="absolute bottom-0 left-0 h-0.5 bg-emerald-500/30 w-full">
                           <motion.div 
                             className="h-full bg-emerald-500"
-                            animate={{ width: `${(countdown / 15) * 100}%` }}
+                            animate={{ width: `${(countdown / 20) * 100}%` }}
                             transition={{ duration: 1, ease: "linear" }}
                           />
                         </div>

@@ -22,14 +22,11 @@ db.exec(`
     locked_earnings REAL DEFAULT 0,
     referral_code TEXT UNIQUE,
     referred_by INTEGER,
+    fraud_flags INTEGER DEFAULT 0,
+    last_earning_at DATETIME,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(referred_by) REFERENCES users(id)
   );
-
-  -- Migration: Add columns if they don't exist (for existing DB)
-  -- SQLite doesn't support ADD COLUMN IF NOT EXISTS easily in one line, 
-  -- but since this is an MVP we can just ensure the table is created correctly.
-  -- For a real app, we'd use a migration script.
 
   CREATE TABLE IF NOT EXISTS sites (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -47,6 +44,10 @@ db.exec(`
     points_earned REAL,
     ip_address TEXT,
     user_agent TEXT,
+    session_id TEXT,
+    start_time DATETIME,
+    is_valid INTEGER DEFAULT 1,
+    fraud_reason TEXT,
     viewed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(viewer_id) REFERENCES users(id),
     FOREIGN KEY(site_id) REFERENCES sites(id)
@@ -60,6 +61,15 @@ db.exec(`
     wallet_address TEXT,
     requested_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(user_id) REFERENCES users(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS adsterra_revenue_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT,
+    revenue REAL,
+    impressions INTEGER,
+    cpm REAL,
+    fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 `);
 
@@ -93,6 +103,45 @@ if (!columns.includes('password')) {
     db.prepare('ALTER TABLE users ADD COLUMN password TEXT').run();
     console.log('Migration: Added password column to users table');
   } catch (e) { console.error('Migration error (password):', e); }
+}
+
+if (!columns.includes('fraud_flags')) {
+  try {
+    db.prepare('ALTER TABLE users ADD COLUMN fraud_flags INTEGER DEFAULT 0').run();
+  } catch (e) {}
+}
+
+const viewColumns = (db.prepare("PRAGMA table_info(views)").all() as any[]).map(c => c.name);
+if (!viewColumns.includes('session_id')) {
+  try {
+    db.prepare('ALTER TABLE views ADD COLUMN session_id TEXT').run();
+    db.prepare('ALTER TABLE views ADD COLUMN start_time DATETIME').run();
+    db.prepare('ALTER TABLE views ADD COLUMN is_valid INTEGER DEFAULT 1').run();
+    db.prepare('ALTER TABLE views ADD COLUMN fraud_reason TEXT').run();
+  } catch (e) {}
+}
+
+// Helper: VPN/Proxy Detection (Basic)
+function isProxy(req: express.Request): boolean {
+  const proxyHeaders = [
+    'x-forwarded-for',
+    'x-real-ip',
+    'via',
+    'forwarded',
+    'x-forwarded-proto',
+    'proxy-connection'
+  ];
+  
+  // Check for common proxy headers
+  for (const header of proxyHeaders) {
+    if (req.headers[header]) return true;
+  }
+
+  // Check for common VPN/Proxy user agents or patterns (simplified)
+  const ua = req.headers['user-agent']?.toLowerCase() || '';
+  if (ua.includes('proxy') || ua.includes('vpn') || ua.includes('tor')) return true;
+
+  return false;
 }
 
 async function startServer() {
@@ -131,14 +180,14 @@ async function startServer() {
         db.prepare('UPDATE users SET points = points + 50 WHERE id = ?').run(referredById);
       }
 
-      const user = db.prepare('SELECT id, username, email, points, earnings, locked_earnings, referral_code FROM users WHERE id = ?').get(result.lastInsertRowid);
+      const user = db.prepare('SELECT id, username, email, points, earnings, locked_earnings, referral_code FROM users WHERE id = ?').get(Number(result.lastInsertRowid));
       res.json(user);
     } catch (err: any) {
+      console.error('Registration error:', err);
       if (err.message.includes('UNIQUE constraint failed')) {
         return res.status(400).json({ error: 'Username or email already exists' });
       }
-      console.error('Registration error:', err);
-      res.status(500).json({ error: 'Registration failed' });
+      res.status(500).json({ error: 'Registration failed', details: err.message });
     }
   });
 
@@ -203,37 +252,94 @@ async function startServer() {
 
     try {
       const result = db.prepare('INSERT INTO sites (owner_id, url, points_per_view) VALUES (?, ?, ?)').run(userId, url, pointsPerView);
-      res.json({ success: true, id: result.lastInsertRowid });
+      res.json({ success: true, id: Number(result.lastInsertRowid) });
     } catch (err) {
       res.status(500).json({ error: 'Failed to add site' });
     }
   });
 
-  app.post('/api/view-complete', (req, res) => {
-    const { siteId, duration } = req.body;
+  app.post('/api/view-start', (req, res) => {
+    const { siteId } = req.body;
     const user = db.prepare('SELECT id FROM users LIMIT 1').get() as any;
+    if (!user) return res.status(401).json({ error: 'No user found' });
+    
+    const sessionId = Math.random().toString(36).substring(7);
+    const startTime = new Date().toISOString();
+
+    try {
+      db.prepare(`
+        INSERT INTO views (viewer_id, site_id, session_id, start_time, ip_address, user_agent, is_valid) 
+        VALUES (?, ?, ?, ?, ?, ?, 0)
+      `).run(user.id, siteId, sessionId, startTime, req.ip, req.headers['user-agent']);
+      
+      res.json({ sessionId });
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to start view session' });
+    }
+  });
+
+  app.post('/api/view-complete', (req, res) => {
+    const { siteId, sessionId } = req.body;
+    const user = db.prepare('SELECT * FROM users LIMIT 1').get() as any;
     if (!user) return res.status(401).json({ error: 'No user found' });
     const userId = user.id;
 
     const ip = req.ip;
     const ua = req.headers['user-agent'];
 
-    // Anti-fraud: Basic check
-    if (duration < 10) {
-      return res.status(400).json({ error: 'View duration too short' });
+    // 1. VPN/Proxy Detection
+    if (isProxy(req)) {
+      db.prepare('UPDATE users SET fraud_flags = fraud_flags + 1 WHERE id = ?').run(userId);
+      return res.status(403).json({ error: 'VPN/Proxy detected. Earning disabled.' });
     }
 
-    // Check for duplicate views from same IP in last hour
-    const recentView = db.prepare('SELECT id FROM views WHERE ip_address = ? AND site_id = ? AND viewed_at > datetime("now", "-1 hour")').get(ip, siteId);
-    
-    if (recentView) {
-      return res.status(400).json({ error: 'Duplicate view detected' });
+    // 2. Daily Earning Cap (100,000 points)
+    const today = new Date().toISOString().split('T')[0];
+    const dailyPoints = db.prepare('SELECT SUM(points_earned) as total FROM views WHERE viewer_id = ? AND viewed_at >= ?').get(userId, today) as any;
+    if ((dailyPoints?.total || 0) >= 100000) {
+      return res.status(400).json({ error: 'Daily earning cap reached' });
+    }
+
+    // 3. IP Cooldown (10 minutes)
+    const recentIpView = db.prepare(`
+      SELECT id FROM views 
+      WHERE ip_address = ? 
+      AND viewed_at > datetime('now', '-10 minutes') 
+      AND is_valid = 1
+    `).get(ip);
+    if (recentIpView) {
+      return res.status(400).json({ error: 'IP cooldown active (10 mins)' });
+    }
+
+    // 4. Session Validation & Duration (20 seconds)
+    const viewSession = db.prepare('SELECT * FROM views WHERE session_id = ? AND viewer_id = ?').get(sessionId, userId) as any;
+    if (!viewSession) {
+      return res.status(400).json({ error: 'Invalid session' });
+    }
+
+    const startTime = new Date(viewSession.start_time).getTime();
+    const now = Date.now();
+    const durationSeconds = (now - startTime) / 1000;
+
+    if (durationSeconds < 20) {
+      db.prepare('UPDATE views SET fraud_reason = "Duration too short" WHERE session_id = ?').run(sessionId);
+      return res.status(400).json({ error: 'View duration too short (min 20s)' });
+    }
+
+    // 5. Anti-Refresh / Duplicate Session Check
+    if (viewSession.is_valid === 1) {
+      return res.status(400).json({ error: 'Session already completed' });
     }
 
     try {
-      const points = 1; // Configurable
-      db.prepare('INSERT INTO views (viewer_id, site_id, points_earned, ip_address, user_agent) VALUES (?, ?, ?, ?, ?)').run(userId, siteId, points, ip, ua);
-      db.prepare('UPDATE users SET points = points + ? WHERE id = ?').run(points, userId);
+      const points = 1; 
+      db.prepare(`
+        UPDATE views 
+        SET points_earned = ?, is_valid = 1, viewed_at = CURRENT_TIMESTAMP 
+        WHERE session_id = ?
+      `).run(points, sessionId);
+      
+      db.prepare('UPDATE users SET points = points + ?, last_earning_at = CURRENT_TIMESTAMP WHERE id = ?').run(points, userId);
       
       res.json({ success: true, points_earned: points });
     } catch (err) {
@@ -242,57 +348,66 @@ async function startServer() {
   });
 
   app.get('/api/adsterra/revenue', async (req, res) => {
-    const apiKey = process.env.ADSTERRA_API_KEY;
-    
-    if (!apiKey || apiKey === 'MY_ADSTERRA_API_KEY' || apiKey.trim() === '') {
-      // Fallback to mock data if API key is missing or placeholder
-      return res.json({
-        daily_revenue: 1.24,
-        total_unpaid: 15.60,
-        cpm: 0.45,
-        is_mock: true,
-        message: "No valid ADSTERRA_API_KEY found in environment."
+    try {
+      // Try to get the latest log from today
+      const today = new Date().toISOString().split('T')[0];
+      const latestLog = db.prepare(`
+        SELECT * FROM adsterra_revenue_logs 
+        WHERE date = ? 
+        ORDER BY fetched_at DESC LIMIT 1
+      `).get(today) as any;
+
+      if (latestLog) {
+        return res.json({
+          daily_revenue: latestLog.revenue,
+          impressions: latestLog.impressions,
+          total_unpaid: latestLog.revenue, // Simplified
+          cpm: latestLog.cpm,
+          is_mock: false,
+          last_updated: latestLog.fetched_at
+        });
+      }
+
+      // Fallback if no log exists yet for today
+      const apiKey = process.env.ADSTERRA_API_KEY;
+      if (!apiKey || apiKey === 'MY_ADSTERRA_API_KEY' || apiKey.trim() === '') {
+        return res.json({
+          daily_revenue: 1.24,
+          total_unpaid: 15.60,
+          cpm: 0.45,
+          is_mock: true,
+          message: "No valid ADSTERRA_API_KEY found. Showing mock data."
+        });
+      }
+
+      res.json({
+        daily_revenue: 0,
+        total_unpaid: 0,
+        cpm: 0,
+        is_mock: false,
+        message: "Revenue data is being fetched. Please check back in a few minutes."
       });
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to fetch revenue stats' });
+    }
+  });
+
+  // Background Job: Fetch Adsterra Revenue every hour
+  async function updateAdsterraRevenue() {
+    const apiKey = process.env.ADSTERRA_API_KEY;
+    if (!apiKey || apiKey === 'MY_ADSTERRA_API_KEY' || apiKey.trim() === '') {
+      console.log('Background Job: Skipping Adsterra fetch (No API Key)');
+      return;
     }
 
     try {
-      // Fetch stats for today
       const today = new Date().toISOString().split('T')[0];
       const url = `https://api.adsterra.com/v1/publisher/stats.json?api_key=${apiKey}&date_from=${today}&date_to=${today}`;
       
-      console.log(`Fetching Adsterra stats from: ${url.replace(apiKey, 'HIDDEN')}`);
-      
       const response = await fetch(url);
-      const contentType = response.headers.get("content-type");
+      if (!response.ok) throw new Error(`Adsterra API error: ${response.status}`);
       
-      let data;
-      if (contentType && contentType.includes("application/json")) {
-        data = await response.json();
-      } else {
-        const text = await response.text();
-        console.warn('Adsterra API Non-JSON Response (Falling back to mock):', text.substring(0, 100));
-        return res.json({
-          daily_revenue: 1.24,
-          total_unpaid: 15.60,
-          cpm: 0.45,
-          is_mock: true,
-          warning: `Adsterra API returned non-JSON (${response.status})`
-        });
-      }
-
-      if (!response.ok) {
-        console.warn(`Adsterra API Error ${response.status} (Falling back to mock):`, data);
-        return res.json({
-          daily_revenue: 1.24,
-          total_unpaid: 15.60,
-          cpm: 0.45,
-          is_mock: true,
-          warning: `Adsterra API error: ${response.status}`
-        });
-      }
-      
-      // Adsterra returns an array of stats per day/placement
-      // We'll aggregate them for the dashboard
+      const data = await response.json();
       let dailyRevenue = 0;
       let impressions = 0;
       
@@ -301,28 +416,24 @@ async function startServer() {
           dailyRevenue += parseFloat(item.revenue || 0);
           impressions += parseInt(item.impressions || 0);
         });
-      } else if (data && data.error) {
-        throw new Error(data.error);
       }
 
-      res.json({
-        daily_revenue: dailyRevenue,
-        impressions: impressions,
-        total_unpaid: dailyRevenue, // Simplified for MVP
-        cpm: impressions > 0 ? (dailyRevenue / impressions) * 1000 : 0,
-        is_mock: false
-      });
+      const cpm = impressions > 0 ? (dailyRevenue / impressions) * 1000 : 0;
+
+      db.prepare(`
+        INSERT INTO adsterra_revenue_logs (date, revenue, impressions, cpm)
+        VALUES (?, ?, ?, ?)
+      `).run(today, dailyRevenue, impressions, cpm);
+
+      console.log(`Background Job: Successfully updated Adsterra revenue for ${today}`);
     } catch (err) {
-      console.error('Adsterra API Fetch Error (Falling back to mock):', err);
-      res.json({
-        daily_revenue: 1.24,
-        total_unpaid: 15.60,
-        cpm: 0.45,
-        is_mock: true,
-        error: (err as Error).message
-      });
+      console.error('Background Job: Failed to fetch Adsterra revenue:', err);
     }
-  });
+  }
+
+  // Run immediately on start and then every hour
+  updateAdsterraRevenue();
+  setInterval(updateAdsterraRevenue, 60 * 60 * 1000);
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== 'production') {
@@ -337,6 +448,12 @@ async function startServer() {
       res.sendFile(path.join(__dirname, 'dist', 'index.html'));
     });
   }
+
+  // Global error handler
+  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    console.error('Unhandled error:', err);
+    res.status(500).json({ error: 'Internal server error', details: err.message });
+  });
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on http://localhost:${PORT}`);
