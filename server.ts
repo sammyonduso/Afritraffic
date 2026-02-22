@@ -4,8 +4,17 @@ import Database from 'better-sqlite3';
 import dotenv from 'dotenv';
 import path from 'path';
 import bcrypt from 'bcryptjs';
+import session from 'express-session';
+import cookieParser from 'cookie-parser';
 
 dotenv.config();
+
+// Extend session type
+declare module 'express-session' {
+  interface SessionData {
+    userId: number;
+  }
+}
 
 const db = new Database('traffic_exchange.db');
 
@@ -149,6 +158,17 @@ async function startServer() {
   const PORT = 3000;
 
   app.use(express.json());
+  app.use(cookieParser());
+  app.use(session({
+    secret: process.env.SESSION_SECRET || 'traffic-exchange-secret',
+    resave: false,
+    saveUninitialized: false,
+    cookie: { 
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 30 * 24 * 60 * 60 * 1000 // 30 days
+    }
+  }));
 
   // API Routes
   app.post('/api/register', async (req, res) => {
@@ -180,7 +200,10 @@ async function startServer() {
         db.prepare('UPDATE users SET points = points + 50 WHERE id = ?').run(referredById);
       }
 
-      const user = db.prepare('SELECT id, username, email, points, earnings, locked_earnings, referral_code FROM users WHERE id = ?').get(Number(result.lastInsertRowid));
+      const userId = Number(result.lastInsertRowid);
+      req.session.userId = userId;
+      
+      const user = db.prepare('SELECT id, username, email, points, earnings, locked_earnings, referral_code FROM users WHERE id = ?').get(userId);
       res.json(user);
     } catch (err: any) {
       console.error('Registration error:', err);
@@ -191,27 +214,67 @@ async function startServer() {
     }
   });
 
+  app.post('/api/login', async (req, res) => {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Missing email or password' });
+    }
+
+    try {
+      const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email) as any;
+      if (!user) {
+        return res.status(401).json({ error: 'Invalid email or password' });
+      }
+
+      const isPasswordValid = await bcrypt.compare(password, user.password);
+      if (!isPasswordValid) {
+        return res.status(401).json({ error: 'Invalid email or password' });
+      }
+
+      req.session.userId = user.id;
+      
+      const { password: _, ...userWithoutPassword } = user;
+      res.json(userWithoutPassword);
+    } catch (err: any) {
+      console.error('Login error:', err);
+      res.status(500).json({ error: 'Login failed' });
+    }
+  });
+
+  app.post('/api/logout', (req, res) => {
+    req.session.destroy((err) => {
+      if (err) {
+        return res.status(500).json({ error: 'Logout failed' });
+      }
+      res.clearCookie('connect.sid');
+      res.json({ success: true });
+    });
+  });
+
   app.get('/api/stats', (req, res) => {
     try {
-      // Mock user for MVP (normally would use session/JWT)
-      let user = db.prepare('SELECT * FROM users LIMIT 1').get();
+      if (!req.session.userId) {
+        return res.status(401).json({ error: 'Not authenticated' });
+      }
+      
+      const user = db.prepare('SELECT id, username, email, points, earnings, locked_earnings, referral_code FROM users WHERE id = ?').get(req.session.userId);
       
       if (!user) {
-        return res.status(401).json({ error: 'No user found' });
+        return res.status(401).json({ error: 'User not found' });
       }
       
       res.json(user);
     } catch (err) {
       console.error('Error in /api/stats:', err);
-      res.status(500).json({ error: 'Internal server error', details: (err as Error).message });
+      res.status(500).json({ error: 'Internal server error' });
     }
   });
 
   app.get('/api/referrals', (req, res) => {
-    const user = db.prepare('SELECT id FROM users LIMIT 1').get() as any;
-    if (!user) return res.status(401).json({ error: 'No user found' });
+    if (!req.session.userId) return res.status(401).json({ error: 'Not authenticated' });
     
-    const userId = user.id;
+    const userId = req.session.userId;
     const referrals = db.prepare(`
       SELECT username, created_at 
       FROM users 
@@ -226,10 +289,9 @@ async function startServer() {
   });
 
   app.get('/api/my-sites', (req, res) => {
-    const user = db.prepare('SELECT id FROM users LIMIT 1').get() as any;
-    if (!user) return res.status(401).json({ error: 'No user found' });
+    if (!req.session.userId) return res.status(401).json({ error: 'Not authenticated' });
 
-    const userId = user.id;
+    const userId = req.session.userId;
     const sites = db.prepare(`
       SELECT s.*, COUNT(v.id) as total_views 
       FROM sites s 
@@ -242,9 +304,8 @@ async function startServer() {
 
   app.post('/api/sites', (req, res) => {
     const { url, pointsPerView } = req.body;
-    const user = db.prepare('SELECT id FROM users LIMIT 1').get() as any;
-    if (!user) return res.status(401).json({ error: 'No user found' });
-    const userId = user.id;
+    if (!req.session.userId) return res.status(401).json({ error: 'Not authenticated' });
+    const userId = req.session.userId;
 
     if (!url || !pointsPerView) {
       return res.status(400).json({ error: 'Missing required fields' });
@@ -260,8 +321,8 @@ async function startServer() {
 
   app.post('/api/view-start', (req, res) => {
     const { siteId } = req.body;
-    const user = db.prepare('SELECT id FROM users LIMIT 1').get() as any;
-    if (!user) return res.status(401).json({ error: 'No user found' });
+    if (!req.session.userId) return res.status(401).json({ error: 'Not authenticated' });
+    const userId = req.session.userId;
     
     const sessionId = Math.random().toString(36).substring(7);
     const startTime = new Date().toISOString();
@@ -270,7 +331,7 @@ async function startServer() {
       db.prepare(`
         INSERT INTO views (viewer_id, site_id, session_id, start_time, ip_address, user_agent, is_valid) 
         VALUES (?, ?, ?, ?, ?, ?, 0)
-      `).run(user.id, siteId, sessionId, startTime, req.ip, req.headers['user-agent']);
+      `).run(userId, siteId, sessionId, startTime, req.ip, req.headers['user-agent']);
       
       res.json({ sessionId });
     } catch (err) {
@@ -280,9 +341,8 @@ async function startServer() {
 
   app.post('/api/view-complete', (req, res) => {
     const { siteId, sessionId } = req.body;
-    const user = db.prepare('SELECT * FROM users LIMIT 1').get() as any;
-    if (!user) return res.status(401).json({ error: 'No user found' });
-    const userId = user.id;
+    if (!req.session.userId) return res.status(401).json({ error: 'Not authenticated' });
+    const userId = req.session.userId;
 
     const ip = req.ip;
     const ua = req.headers['user-agent'];

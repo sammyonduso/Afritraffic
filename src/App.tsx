@@ -39,6 +39,9 @@ export default function App() {
   const [regPassword, setRegPassword] = useState('');
   const [regError, setRegError] = useState('');
   const [isRegistering, setIsRegistering] = useState(false);
+  const [isLoginMode, setIsLoginMode] = useState(true);
+  const [loginEmail, setLoginEmail] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
   const [siteError, setSiteError] = useState<string | null>(null);
   const [isIframeLoading, setIsIframeLoading] = useState(true);
   const [showEarnedPoints, setShowEarnedPoints] = useState<number | null>(null);
@@ -97,6 +100,46 @@ export default function App() {
       setRegError('Network error occurred. Please check your connection.');
     } finally {
       setIsRegistering(false);
+    }
+  };
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setRegError('');
+    setIsRegistering(true);
+    try {
+      const res = await fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: loginEmail, password: loginPassword })
+      });
+      
+      const contentType = res.headers.get("content-type");
+      if (contentType && contentType.includes("application/json")) {
+        const data = await res.json();
+        if (res.ok) {
+          setUser(data);
+        } else {
+          setRegError(data.error || 'Login failed');
+        }
+      } else {
+        const text = await res.text();
+        setRegError(`Server error (${res.status}): ${text.substring(0, 50)}`);
+      }
+    } catch (err) {
+      setRegError('Network error occurred. Please check your connection.');
+    } finally {
+      setIsRegistering(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/logout', { method: 'POST' });
+      setUser(null);
+      setActiveTab('dashboard');
+    } catch (err) {
+      console.error('Logout failed');
     }
   };
 
@@ -334,29 +377,33 @@ export default function App() {
             <div className="w-16 h-16 bg-emerald-600 rounded-2xl flex items-center justify-center text-white mx-auto mb-4 shadow-lg shadow-emerald-200">
               <Zap size={32} />
             </div>
-            <h1 className="text-2xl font-bold">Join Traffic Exchange</h1>
-            <p className="text-gray-500 text-sm">Start earning points and traffic today</p>
+            <h1 className="text-2xl font-bold">{isLoginMode ? 'Welcome Back' : 'Join Traffic Exchange'}</h1>
+            <p className="text-gray-500 text-sm">
+              {isLoginMode ? 'Sign in to continue earning' : 'Start earning points and traffic today'}
+            </p>
           </div>
 
-          <form onSubmit={handleRegister} className="space-y-4">
-            <div>
-              <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Username</label>
-              <input 
-                type="text" 
-                required
-                value={regUsername}
-                onChange={(e) => setRegUsername(e.target.value)}
-                className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                placeholder="Choose a username"
-              />
-            </div>
+          <form onSubmit={isLoginMode ? handleLogin : handleRegister} className="space-y-4">
+            {!isLoginMode && (
+              <div>
+                <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Username</label>
+                <input 
+                  type="text" 
+                  required
+                  value={regUsername}
+                  onChange={(e) => setRegUsername(e.target.value)}
+                  className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  placeholder="Choose a username"
+                />
+              </div>
+            )}
             <div>
               <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Email Address</label>
               <input 
                 type="email" 
                 required
-                value={regEmail}
-                onChange={(e) => setRegEmail(e.target.value)}
+                value={isLoginMode ? loginEmail : regEmail}
+                onChange={(e) => isLoginMode ? setLoginEmail(e.target.value) : setRegEmail(e.target.value)}
                 className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
                 placeholder="your@email.com"
               />
@@ -366,8 +413,8 @@ export default function App() {
               <input 
                 type="password" 
                 required
-                value={regPassword}
-                onChange={(e) => setRegPassword(e.target.value)}
+                value={isLoginMode ? loginPassword : regPassword}
+                onChange={(e) => isLoginMode ? setLoginPassword(e.target.value) : setRegPassword(e.target.value)}
                 className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
                 placeholder="••••••••"
               />
@@ -380,7 +427,7 @@ export default function App() {
               </div>
             )}
 
-            {localStorage.getItem('referral_code') && (
+            {!isLoginMode && localStorage.getItem('referral_code') && (
               <div className="p-3 bg-emerald-50 border border-emerald-100 rounded-xl text-emerald-700 text-xs flex items-center gap-2">
                 <Users size={14} />
                 Referral code applied: <span className="font-bold">{localStorage.getItem('referral_code')}</span>
@@ -392,12 +439,23 @@ export default function App() {
               disabled={isRegistering}
               className="w-full py-4 bg-emerald-600 text-white rounded-2xl font-bold shadow-lg shadow-emerald-100 hover:bg-emerald-700 transition-all disabled:opacity-50"
             >
-              {isRegistering ? 'Creating Account...' : 'Create Account'}
+              {isRegistering ? (isLoginMode ? 'Signing in...' : 'Creating Account...') : (isLoginMode ? 'Sign In' : 'Create Account')}
             </button>
           </form>
 
-          <div className="text-center text-xs text-gray-400">
-            By registering, you agree to our Terms of Service.
+          <div className="text-center space-y-4">
+            <button 
+              onClick={() => {
+                setIsLoginMode(!isLoginMode);
+                setRegError('');
+              }}
+              className="text-sm text-emerald-600 font-semibold hover:underline"
+            >
+              {isLoginMode ? "Don't have an account? Register" : "Already have an account? Sign In"}
+            </button>
+            <div className="text-xs text-gray-400">
+              By {isLoginMode ? 'signing in' : 'registering'}, you agree to our Terms of Service.
+            </div>
           </div>
         </motion.div>
       </div>
@@ -457,7 +515,7 @@ export default function App() {
           />
           <div className="mt-auto p-4">
             <button 
-              onClick={() => setUser(null)}
+              onClick={handleLogout}
               className="w-full flex items-center gap-3 px-4 py-3 text-red-600 hover:bg-red-50 rounded-xl transition-colors font-medium"
             >
               <X size={20} />
