@@ -39,6 +39,9 @@ export default function App() {
   const [regPassword, setRegPassword] = useState('');
   const [regError, setRegError] = useState('');
   const [isRegistering, setIsRegistering] = useState(false);
+  const [siteError, setSiteError] = useState<string | null>(null);
+  const [isIframeLoading, setIsIframeLoading] = useState(true);
+  const [showEarnedPoints, setShowEarnedPoints] = useState<number | null>(null);
   const viewTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
@@ -139,6 +142,58 @@ export default function App() {
 
   const handleAddSite = async (e: React.FormEvent) => {
     e.preventDefault();
+    setSiteError(null);
+
+    const validateAndGetDomain = (urlStr: string) => {
+      let formattedUrl = urlStr.trim();
+      if (!/^https?:\/\//i.test(formattedUrl)) {
+        formattedUrl = 'https://' + formattedUrl;
+      }
+
+      try {
+        const url = new URL(formattedUrl);
+        const hostname = url.hostname.toLowerCase();
+        
+        // Basic TLD check: must have at least one dot and the last part must be 2+ chars
+        const parts = hostname.split('.');
+        if (parts.length < 2 || parts[parts.length - 1].length < 2) {
+          return { domain: null, error: 'Invalid domain format. Missing or invalid TLD (e.g., .com, .net)' };
+        }
+
+        // Check for IP addresses (optional but good for a traffic exchange)
+        const isIp = /^(\d{1,3}\.){3}\d{1,3}$/.test(hostname);
+        if (isIp) {
+          return { domain: hostname, error: null };
+        }
+
+        return { domain: hostname.replace('www.', ''), error: null };
+      } catch {
+        return { domain: null, error: 'Please enter a valid URL (e.g., https://example.com)' };
+      }
+    };
+
+    const { domain: newDomain, error: validationError } = validateAndGetDomain(newSiteUrl);
+    
+    if (validationError) {
+      setSiteError(validationError);
+      return;
+    }
+
+    if (!newDomain) {
+      setSiteError('Invalid URL');
+      return;
+    }
+
+    const domainExists = mySites.some(site => {
+      const { domain } = validateAndGetDomain(site.url);
+      return domain === newDomain;
+    });
+
+    if (domainExists) {
+      setSiteError('This domain is already in your list. You can only add one site per domain.');
+      return;
+    }
+
     try {
       const res = await fetch('/api/sites', {
         method: 'POST',
@@ -149,9 +204,13 @@ export default function App() {
         setNewSiteUrl('');
         setNewSitePoints(1);
         fetchMySites();
+      } else {
+        const data = await res.json();
+        setSiteError(data.error || 'Failed to add site');
       }
     } catch (err) {
       console.error('Failed to add site');
+      setSiteError('Network error occurred');
     }
   };
 
@@ -178,12 +237,15 @@ export default function App() {
 
   const startExchange = () => {
     setIsViewing(true);
+    setIsIframeLoading(true);
     setCurrentSite({
       id: Math.floor(Math.random() * 100),
       url: 'https://example.com',
       points_per_view: 1
     });
     setCountdown(15);
+    
+    if (viewTimerRef.current) clearInterval(viewTimerRef.current);
     
     viewTimerRef.current = setInterval(() => {
       setCountdown(prev => {
@@ -207,8 +269,10 @@ export default function App() {
       const data = await res.json();
       if (data.success) {
         setUser(prev => prev ? { ...prev, points: prev.points + data.points_earned } : null);
+        setShowEarnedPoints(data.points_earned);
+        setTimeout(() => setShowEarnedPoints(null), 3000);
         // Continue to next site
-        startExchange();
+        setTimeout(startExchange, 1000);
       }
     } catch (err) {
       setIsViewing(false);
@@ -533,51 +597,104 @@ export default function App() {
                           <p className="text-xs text-gray-500 uppercase tracking-wider font-semibold">Minimum Time</p>
                         </div>
                       </div>
-                      <button 
+                      <motion.button 
+                        whileHover={{ scale: 1.02 }}
+                        whileTap={{ scale: 0.98 }}
                         onClick={startExchange}
-                        className="px-12 py-4 bg-emerald-600 text-white rounded-2xl font-bold text-lg shadow-xl shadow-emerald-200 hover:bg-emerald-700 transition-all transform hover:-translate-y-1"
+                        className="px-12 py-4 bg-emerald-600 text-white rounded-2xl font-bold text-lg shadow-xl shadow-emerald-200 hover:bg-emerald-700 transition-all"
                       >
                         Start Surfing
-                      </button>
+                      </motion.button>
                     </div>
                   ) : (
-                    <div className="flex-1 flex flex-col bg-white rounded-2xl border border-gray-200 overflow-hidden shadow-2xl">
-                      <div className="h-14 bg-gray-900 text-white px-6 flex items-center justify-between">
-                        <div className="flex items-center gap-4">
-                          <span className="text-sm font-mono text-emerald-400">SURFING MODE</span>
-                          <div className="h-4 w-px bg-gray-700" />
-                          <span className="text-sm opacity-70 truncate max-w-[200px]">{currentSite?.url}</span>
-                        </div>
-                        <div className="flex items-center gap-6">
-                          <div className="flex items-center gap-2">
-                            <Clock size={16} className="text-emerald-400" />
-                            <span className="font-mono text-lg">{countdown}s</span>
+                    <div className="flex-1 flex flex-col bg-white rounded-2xl border border-gray-200 overflow-hidden shadow-2xl relative">
+                      <div className="h-14 bg-gray-900 text-white px-6 flex flex-col justify-center relative">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-4">
+                            <span className="text-xs font-bold tracking-widest text-emerald-400">SURFING</span>
+                            <div className="h-4 w-px bg-gray-700" />
+                            <span className="text-xs opacity-70 truncate max-w-[200px] font-mono">{currentSite?.url}</span>
                           </div>
-                          <button 
-                            onClick={stopExchange}
-                            className="px-4 py-1.5 bg-red-500/20 text-red-400 rounded-lg text-xs font-bold hover:bg-red-500/30 transition-colors"
-                          >
-                            STOP
-                          </button>
+                          <div className="flex items-center gap-6">
+                            <div className="flex items-center gap-2">
+                              <div className="relative w-8 h-8 flex items-center justify-center">
+                                <svg className="absolute inset-0 w-full h-full -rotate-90">
+                                  <circle 
+                                    cx="16" cy="16" r="14" 
+                                    fill="none" stroke="currentColor" 
+                                    strokeWidth="3" className="text-gray-700"
+                                  />
+                                  <motion.circle 
+                                    cx="16" cy="16" r="14" 
+                                    fill="none" stroke="currentColor" 
+                                    strokeWidth="3" className="text-emerald-500"
+                                    strokeDasharray="88"
+                                    animate={{ strokeDashoffset: 88 - (88 * countdown / 15) }}
+                                    transition={{ duration: 1, ease: "linear" }}
+                                  />
+                                </svg>
+                                <span className="font-mono text-[10px] font-bold">{countdown}</span>
+                              </div>
+                            </div>
+                            <button 
+                              onClick={stopExchange}
+                              className="px-4 py-1.5 bg-red-500/20 text-red-400 rounded-lg text-xs font-bold hover:bg-red-500/30 transition-colors"
+                            >
+                              STOP
+                            </button>
+                          </div>
+                        </div>
+                        <div className="absolute bottom-0 left-0 h-0.5 bg-emerald-500/30 w-full">
+                          <motion.div 
+                            className="h-full bg-emerald-500"
+                            animate={{ width: `${(countdown / 15) * 100}%` }}
+                            transition={{ duration: 1, ease: "linear" }}
+                          />
                         </div>
                       </div>
-                      <div className="flex-1 bg-gray-100 relative">
-                        <div className="absolute inset-0 flex flex-col items-center justify-center p-12 text-center">
-                          <div className="w-16 h-16 border-4 border-emerald-500 border-t-transparent rounded-full animate-spin mb-6" />
-                          <h3 className="text-xl font-bold mb-2">Loading Partner Website...</h3>
-                          <p className="text-gray-500 max-w-md">
-                            Please keep this tab active to earn points. 
-                            Switching tabs will pause the timer.
-                          </p>
-                          <div className="mt-8 p-4 bg-blue-50 border border-blue-100 rounded-xl text-blue-700 text-sm">
-                            Adsterra Popunder Active
+                      
+                      <div className="flex-1 bg-gray-50 relative">
+                        {isIframeLoading && (
+                          <div className="absolute inset-0 z-10 bg-gray-50 flex flex-col items-center justify-center p-12 text-center">
+                            <motion.div 
+                              animate={{ 
+                                scale: [1, 1.1, 1],
+                                rotate: [0, 180, 360]
+                              }}
+                              transition={{ duration: 2, repeat: Infinity }}
+                              className="w-16 h-16 border-4 border-emerald-500 border-t-transparent rounded-full mb-6" 
+                            />
+                            <h3 className="text-xl font-bold mb-2">Loading Partner Website...</h3>
+                            <p className="text-gray-500 max-w-md text-sm">
+                              Please keep this tab active to earn points. 
+                              The timer will continue once the site is ready.
+                            </p>
                           </div>
-                        </div>
+                        )}
+                        
                         <iframe 
                           src={currentSite?.url} 
-                          className="w-full h-full border-none opacity-0 pointer-events-none" 
+                          className={`w-full h-full border-none transition-opacity duration-500 ${isIframeLoading ? 'opacity-0' : 'opacity-100'}`}
+                          onLoad={() => setIsIframeLoading(false)}
+                          referrerPolicy="no-referrer"
                           title="Traffic Site"
                         />
+
+                        <AnimatePresence>
+                          {showEarnedPoints !== null && (
+                            <motion.div 
+                              initial={{ opacity: 0, scale: 0.5, y: 20 }}
+                              animate={{ opacity: 1, scale: 1, y: 0 }}
+                              exit={{ opacity: 0, scale: 0.5, y: -20 }}
+                              className="absolute bottom-8 left-1/2 -translate-x-1/2 bg-emerald-600 text-white px-6 py-3 rounded-2xl shadow-2xl flex items-center gap-3 z-20"
+                            >
+                              <div className="w-8 h-8 bg-white/20 rounded-lg flex items-center justify-center">
+                                <Zap size={18} />
+                              </div>
+                              <span className="font-bold">+{showEarnedPoints.toFixed(1)} Points Earned!</span>
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
                       </div>
                     </div>
                   )
@@ -593,8 +710,11 @@ export default function App() {
                             required
                             placeholder="https://your-website.com"
                             value={newSiteUrl}
-                            onChange={(e) => setNewSiteUrl(e.target.value)}
-                            className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                            onChange={(e) => {
+                              setNewSiteUrl(e.target.value);
+                              if (siteError) setSiteError(null);
+                            }}
+                            className={`w-full bg-gray-50 border ${siteError ? 'border-red-300 ring-1 ring-red-100' : 'border-gray-200'} rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500`}
                           />
                         </div>
                         <div>
@@ -618,6 +738,16 @@ export default function App() {
                           </div>
                         </div>
                       </form>
+                      {siteError && (
+                        <motion.div 
+                          initial={{ opacity: 0, y: -10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          className="mt-4 p-3 bg-red-50 border border-red-100 rounded-xl text-red-600 text-xs flex items-center gap-2"
+                        >
+                          <AlertCircle size={14} />
+                          {siteError}
+                        </motion.div>
+                      )}
                     </section>
 
                     <section className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
