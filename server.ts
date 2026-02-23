@@ -170,12 +170,18 @@ async function startServer() {
     secret: process.env.SESSION_SECRET || 'traffic-exchange-secret',
     resave: false,
     saveUninitialized: false,
+    name: 'afri_traffic_sid',
     cookie: { 
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
       maxAge: 30 * 24 * 60 * 60 * 1000 // 30 days
     }
   }));
+
+  // Health check
+  app.get('/api/health', (req, res) => {
+    res.json({ status: 'ok', time: new Date().toISOString() });
+  });
 
   // API Routes
   app.post('/api/register', async (req, res) => {
@@ -457,6 +463,11 @@ async function startServer() {
     } catch (err) {
       res.status(500).json({ error: 'Failed to fetch revenue stats' });
     }
+  });
+
+  // API 404 Catch-all (Before Vite)
+  app.all('/api/*', (req, res) => {
+    res.status(404).json({ error: `API route not found: ${req.method} ${req.url}` });
   });
 
   // Background Job: Fetch Adsterra Revenue every hour

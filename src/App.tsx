@@ -42,6 +42,7 @@ export default function App() {
   const [isLoginMode, setIsLoginMode] = useState(true);
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
+  const [apiStatus, setApiStatus] = useState<'checking' | 'online' | 'offline'>('checking');
   const [siteError, setSiteError] = useState<string | null>(null);
   const [isIframeLoading, setIsIframeLoading] = useState(true);
   const [showEarnedPoints, setShowEarnedPoints] = useState<number | null>(null);
@@ -55,8 +56,19 @@ export default function App() {
     if (ref) {
       localStorage.setItem('referral_code', ref);
     }
+    checkApiHealth();
     fetchUserData();
   }, []);
+
+  const checkApiHealth = async () => {
+    try {
+      const res = await fetch('/api/health');
+      if (res.ok) setApiStatus('online');
+      else setApiStatus('offline');
+    } catch (err) {
+      setApiStatus('offline');
+    }
+  };
 
   useEffect(() => {
     if (user) {
@@ -381,6 +393,12 @@ export default function App() {
             <p className="text-gray-500 text-sm">
               {isLoginMode ? 'Sign in to continue earning' : 'Start earning points and traffic today'}
             </p>
+            {apiStatus === 'offline' && (
+              <div className="mt-2 inline-flex items-center gap-1.5 px-2 py-1 bg-red-50 text-red-600 rounded-md text-[10px] font-bold uppercase tracking-wider">
+                <AlertCircle size={10} />
+                Backend Offline
+              </div>
+            )}
           </div>
 
           <form onSubmit={isLoginMode ? handleLogin : handleRegister} className="space-y-4">
